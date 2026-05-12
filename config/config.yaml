@@ -1,0 +1,100 @@
+# PoseVision Edge AI — runtime configuration
+# Paths are relative to the pose-vision project root unless absolute.
+
+models:
+  ppe_weights: "models/yolov8n-ppe.pt"
+  pose_weights: "models/yolov8n-pose.pt"
+  ppe_class_yaml: "models/ppe.yaml"
+
+camera:
+  # Webcam index or video file path (overridden by CLI)
+  source: 0
+  # Use string for file: "assets/videos/example_workers.mp4"
+  # ESP32-CAM (CLI: --source esp32cam --stream-url http://IP:81/stream)
+  esp32_stream_url: ""
+  esp32_reconnect_delay_s: 2.0
+  esp32_open_timeout_ms: 8000
+  esp32_read_retries: 5
+  esp32_buffer_size: 1
+  esp32_target_fps: 12.0
+
+esp32_telemetry:
+  enabled: false
+  serial_port: "" # e.g. COM5 or /dev/ttyUSB0
+  baudrate: 115200
+  http_poll_url: ""
+  poll_interval_s: 0.5
+  eval_interval_s: 0.15
+  latch_tamper: true
+  halt_pipeline_on_tamper: false
+  trigger_zeroization: false
+  thresholds:
+    temp_max_c: 55.0
+    distance_min_mm: 50.0
+    distance_max_mm: 8000.0
+    light_trigger_above: null
+    orientation_delta_deg: 35.0
+
+inference:
+  iou_person_ppe: 0.25
+  # Small PPE boxes (helmet/vest) often have tiny IoU with full person box.
+  # This requires that at least this fraction of PPE box lies inside person box.
+  ppe_inside_person_min: 0.4
+  iou_pose_person: 0.3
+  conf_threshold: 0.25
+
+posture:
+  standing_min_deg: 60
+  standing_max_deg: 100
+  sitting_max_deg: 130
+  # Above sitting_max_deg => Lying (fall risk)
+
+tripwire:
+  enabled: true
+  # Polygon in pixel coordinates [x, y] — set to your camera FOV (clockwise or counter-clockwise)
+  polygon:
+    - [100, 100]
+    - [540, 100]
+    - [540, 380]
+    - [100, 380]
+
+privacy:
+  # Never persist raw frames; keep only in RAM for live preview
+  volatile_frame_buffer_size: 2
+  # Allow optional annotated video export (must opt in via CLI)
+  allow_video_export: false
+
+event_engine:
+  debounce_frames: 15
+
+logging:
+  secure: true
+  debounce_seconds: 2
+  log_file: "logs/secure_log.jsonl"
+  vpap_log_path: "logs/vpap_events.jsonl"
+  console: true
+
+api:
+  host: "127.0.0.1"
+  port: 8000
+
+hardware_security:
+  enabled: true
+  mode: "simulation"        # "gpio", "serial", or "simulation"
+  gpio_pin: 17
+  serial_port: "/dev/ttyUSB0"
+  baudrate: 115200
+
+zeroization:
+  delete_models: false
+  log_dir: "logs/"
+  shutdown_on_tamper: false  # set true in production
+
+attestation:
+  model_globs:
+    - "models/*.pt"
+  script_globs:
+    - "core/**/*.py"
+    - "scripts/**/*.py"
+    - "security/**/*.py"
+    - "api/**/*.py"
