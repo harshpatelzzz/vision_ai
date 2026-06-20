@@ -71,6 +71,8 @@ class EdgeVisionPipeline:
     tripwire_polygon: List[List[float]] = field(default_factory=list)
     volatile_store: Optional[VolatileFrameStore] = None
     privacy_guard: Optional[PrivacyGuard] = None
+    # If > 0, run both YOLO models on a width-limited resize (faster on CPU); boxes mapped back to full frame.
+    inference_max_width: int = 0
 
     _ppe_model: Any = field(init=False, repr=False)
     _pose_model: Any = field(init=False, repr=False)
@@ -109,13 +111,15 @@ class EdgeVisionPipeline:
         if self.privacy_guard is not None:
             frame_bgr = self.privacy_guard.safe_frame_view(frame_bgr)
 
+        infer_bgr, scale_to_orig = self._letterbox_infer_size(frame_bgr, self.inference_max_width)
+
         pose_res = self._pose_model(
-            frame_bgr,
+            infer_bgr,
             verbose=False,
             conf=self.conf_threshold,
         )[0]
         ppe_res = self._ppe_model(
-            frame_bgr,
+            infer_bgr,
             verbose=False,
             conf=self.conf_threshold,
         )[0]
@@ -124,11 +128,14 @@ class EdgeVisionPipeline:
 
         annotated = frame_bgr.copy()
         self._draw_tripwire(annotated)
-        self._draw_all_ppe_boxes(annotated, ppe_res)
 
-        persons = self._extract_person_boxes(ppe_res)
-        ppe_items = self._extract_ppe_items(ppe_res)
-        pose_pairs = self._extract_pose_pairs(pose_res)
+        persons = [self._scale_xyxy(b, scale_to_orig) for b in self._extract_person_boxes(ppe_res)]
+        ppe_items = [
+            (self._scale_xyxy(b, scale_to_orig), cid, lab) for b, cid, lab in self._extract_ppe_items(ppe_res)
+        ]
+        pose_pairs = self._scale_pose_pairs(self._extract_pose_pairs(pose_res), scale_to_orig)
+
+        self._draw_ppe_boxes_from_items(annotated, ppe_items)
 
         if not persons and pose_pairs:
             persons = [pb for pb, _ in pose_pairs]
@@ -180,6 +187,34 @@ class EdgeVisionPipeline:
             inference_ms=inference_ms,
         )
 
+    @staticmethod
+    def _letterbox_infer_size(bgr: np.ndarray, max_width: int) -> Tuple[np.ndarray, float]:
+        """Return (image_for_yolo, multiply_to_map_coords_to_original)."""
+        if max_width <= 0:
+            return bgr, 1.0
+        h, w = bgr.shape[:2]
+        if w <= max_width:
+            return bgr, 1.0
+        nw = int(max_width)
+        nh = max(1, int(round(h * (nw / float(w)))))
+        small = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+        return small, w / float(nw)
+
+    @staticmethod
+    def _scale_xyxy(box: BBox, s: float) -> BBox:
+        return (box[0] * s, box[1] * s, box[2] * s, box[3] * s)
+
+    @staticmethod
+    def _scale_pose_pairs(
+        pairs: List[Tuple[BBox, List[List[float]]]],
+        s: float,
+    ) -> List[Tuple[BBox, List[List[float]]]]:
+        out: List[Tuple[BBox, List[List[float]]]] = []
+        for pbox, kpts in pairs:
+            nk = [[float(x) * s, float(y) * s] for x, y in kpts]
+            out.append((EdgeVisionPipeline._scale_xyxy(pbox, s), nk))
+        return out
+
     def _draw_all_ppe_boxes(self, frame: np.ndarray, ppe_res: Any) -> None:
         """Draw every PPE detector box (legacy demo behavior)."""
         if ppe_res.boxes is None or len(ppe_res.boxes) == 0:
@@ -191,6 +226,27 @@ class EdgeVisionPipeline:
             c = int(cls[i])
             label = self._label_map.get(c, str(c))
             x1, y1, x2, y2 = map(int, xyxy[i])
+            low = label.lower()
+            if "no-" in low or "no_" in low:
+                color = (0, 0, 255)
+            else:
+                color = (0, 255, 0)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+            cv2.putText(
+                frame,
+                label,
+                (x1, max(12, y1 - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
+    def _draw_ppe_boxes_from_items(self, frame: np.ndarray, items: List[Tuple[BBox, int, str]]) -> None:
+        """Draw PPE boxes from already-scaled (full-frame) item list."""
+        for box, _cid, label in items:
+            x1, y1, x2, y2 = map(int, box)
             low = label.lower()
             if "no-" in low or "no_" in low:
                 color = (0, 0, 255)
@@ -446,4 +502,5 @@ def build_pipeline_from_config(
         tripwire_polygon=list(tw.get("polygon", [])),
         volatile_store=VolatileFrameStore(maxlen=int(priv.get("volatile_frame_buffer_size", 2))),
         privacy_guard=privacy_guard,
+        inference_max_width=int(inf.get("max_inference_width", 640)),
     )

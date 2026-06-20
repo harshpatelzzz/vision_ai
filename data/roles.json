@@ -1,0 +1,27 @@
+{
+  "Admin": {
+    "description": "Full access to every zone; never blocked.",
+    "allowed_zones": ["*"],
+    "restricted_zones": []
+  },
+  "Guard": {
+    "description": "Security personnel patrolling all monitored zones.",
+    "allowed_zones": ["ZoneA", "ZoneB", "ZoneC"],
+    "restricted_zones": []
+  },
+  "Engineer": {
+    "description": "Technical staff with access to work and equipment zones.",
+    "allowed_zones": ["ZoneA", "ZoneB"],
+    "restricted_zones": ["ZoneC"]
+  },
+  "Worker": {
+    "description": "General workforce restricted to the main work zone.",
+    "allowed_zones": ["ZoneA"],
+    "restricted_zones": ["ZoneB", "ZoneC"]
+  },
+  "Visitor": {
+    "description": "Escorted visitors; not permitted in any restricted zone.",
+    "allowed_zones": [],
+    "restricted_zones": ["ZoneA", "ZoneB", "ZoneC"]
+  }
+}

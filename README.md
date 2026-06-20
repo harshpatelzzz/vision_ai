@@ -37,7 +37,8 @@ Designed for **near–real-time** inference: **one forward pass per model per fr
 | **Pose linkage** | Best IoU match between person box and pose detection for keypoints |
 | **Posture** | Torso angle → Standing / Sitting / Lying (fall-related) |
 | **Tripwire** | Closed polygon + `cv2.pointPolygonTest` on person center → intrusion flag |
-| **Event engine** | Debounced alerts: `NO_HELMET`, `NO_VEST`, `INTRUSION`, `FALL_DETECTED` |
+| **RFID + RBAC** | MFRC522/ESP32 tag scan authorizes intruders per zone → `AUTHORIZED_ACCESS` vs `ZONE_VIOLATION` / `UNKNOWN_RFID` / `UNAUTHORIZED_INTRUSION` (see [docs/rfid_access_control.md](docs/rfid_access_control.md)) |
+| **Event engine** | Debounced alerts: `NO_HELMET`, `NO_VEST`, `INTRUSION`, `FALL_DETECTED`, plus RFID access decisions |
 | **VPAP logs** | SHA-256 chained JSON Lines (`prev_hash` → `current_hash`) |
 | **Blockchain audit** | Private PoA chain with signed blocks, Merkle roots, and distributed node sync |
 | **Encrypted metadata storage** | Event metadata encrypted with Fernet and stored via IPFS CID references |

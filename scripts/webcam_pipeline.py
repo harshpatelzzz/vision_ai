@@ -111,7 +111,12 @@ def main() -> None:
             src = int(src_arg)
         except (TypeError, ValueError):
             src = 0
-        cap = cv2.VideoCapture(src)
+        use_dshow = bool(cam_cfg.get("prefer_dshow", True)) and sys.platform == "win32"
+        api = cv2.CAP_DSHOW if use_dshow else cv2.CAP_ANY
+        cap = cv2.VideoCapture(src, api)
+        if not cap.isOpened() and use_dshow:
+            logging.warning("Webcam failed with DirectShow; retrying default backend")
+            cap = cv2.VideoCapture(src)
 
     if not cap.isOpened():
         logging.error("Cannot open video source")
@@ -139,6 +144,28 @@ def main() -> None:
     fh = logging.FileHandler(ROOT / "logs" / "posevision_console.log", encoding="utf-8")
     fh.setFormatter(logging.Formatter(log_format))
     root_log.addHandler(fh)
+
+    if not args.no_view:
+        win = "PoseVision Edge — Webcam"
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        ret0, warm = cap.read()
+        if ret0 and warm is not None:
+            msg = "Loading YOLO models (first time can take 30-90s)..."
+            cv2.putText(
+                warm,
+                msg,
+                (10, 36),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 220, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.imshow(win, warm)
+            cv2.waitKey(1)
+            logging.info("%s Preview will update after models load.", msg)
+        else:
+            logging.warning("Could not read warmup frame; preview may delay until first inference.")
 
     pipeline = build_pipeline_from_config(ROOT, cfg)
     debounce = int(cfg.get("event_engine", {}).get("debounce_frames", 15))

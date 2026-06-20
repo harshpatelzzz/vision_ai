@@ -202,6 +202,85 @@ def setup_esp32_sensor_stack(
     return store, daemon, bridge
 
 
+def setup_rfid_stack(
+    config: Dict[str, Any],
+    project_root: Path,
+    event_engine: EventEngine,
+    vpap: Optional[Union[VPAPLogger, SecureLogger]],
+) -> Optional[Any]:
+    """
+    Optional RFID + RBAC authorization layer over tripwire intrusion detection.
+
+    When ``rfid.enabled`` is True this:
+      1. Starts an :class:`~hardware.rfid_reader.RfidReader` (serial/http/sim),
+      2. Builds an :class:`~security.access_control.AccessControl` bound to the
+         reader's latest UID,
+      3. Installs ``access_control.resolve_intrusion`` as the EventEngine's
+         access resolver — so intrusions become AUTHORIZED_ACCESS /
+         ZONE_VIOLATION / UNKNOWN_RFID / UNAUTHORIZED_INTRUSION,
+      4. Routes ACCESS_DENIED security alerts (repeated failures) into the VPAP
+         hash chain + blockchain ledger,
+      5. Registers both with :mod:`hardware.rfid_registry` for the API.
+
+    Returns the :class:`RfidReader` (or None when disabled).
+    """
+    rfid_cfg = config.get("rfid") or {}
+    if not rfid_cfg.get("enabled", False):
+        return None
+
+    from hardware.rfid_reader import RfidReader
+    from hardware.rfid_registry import register_rfid
+    from security.access_control import build_access_control_from_config
+
+    tlog = _get_tamper_logger(project_root)
+
+    reader = RfidReader(
+        mode=str(rfid_cfg.get("mode", "simulation")),
+        serial_port=(str(rfid_cfg["serial_port"]) if rfid_cfg.get("serial_port") else None),
+        baudrate=int(rfid_cfg.get("baudrate", 115200)),
+        http_poll_url=(str(rfid_cfg["http_poll_url"]) if rfid_cfg.get("http_poll_url") else None),
+        poll_interval_s=float(rfid_cfg.get("poll_interval_s", 0.3)),
+        dedup_seconds=float(rfid_cfg.get("scan_dedup_seconds", 1.5)),
+        correlation_window_seconds=float(rfid_cfg.get("correlation_window_seconds", 5.0)),
+        simulation_uids=list(rfid_cfg.get("simulation_uids") or []),
+    )
+
+    def on_security_alert(alert_type: str, detail: Dict[str, Any]) -> None:
+        tlog.critical("RFID %s %s", alert_type, detail)
+        if vpap is None:
+            return
+        observation: Dict[str, Any] = {
+            "timestamp": detail.get("timestamp", ""),
+            "bbox": [0.0, 0.0, 0.0, 0.0],
+            "ppe": {"helmet": False, "vest": False},
+            "posture": "Unknown",
+            "intrusion": True,
+            "access": detail,
+        }
+        rec = normalize_event_record(
+            alert_type=alert_type,
+            person_id=-1,
+            observation=observation,
+        )
+        if isinstance(vpap, SecureLogger):
+            vpap.append_forced(rec)
+        else:
+            vpap.append(rec)
+
+    access_control = build_access_control_from_config(
+        config,
+        project_root,
+        uid_provider=reader.read_uid,
+        on_security_alert=on_security_alert,
+    )
+
+    reader.start_reader()
+    event_engine.set_access_resolver(access_control.resolve_intrusion)
+    register_rfid(reader=reader, access_control=access_control)
+    tlog.info("RFID access control enabled (mode=%s)", reader.mode)
+    return reader
+
+
 def run_edge_loop(
     cap: cv2.VideoCapture,
     pipeline: EdgeVisionPipeline,
@@ -231,6 +310,7 @@ def run_edge_loop(
     stop_flag = threading.Event()
 
     hw_monitor = None
+    rfid_reader = None
     if config is not None and project_root is not None:
         hw_monitor = setup_hardware_monitor(
             config=config,
@@ -239,6 +319,12 @@ def run_edge_loop(
             vpap=vpap,
             pipeline=pipeline,
             stop_flag=stop_flag,
+        )
+        rfid_reader = setup_rfid_stack(
+            config=config,
+            project_root=project_root,
+            event_engine=event_engine,
+            vpap=vpap,
         )
 
     if (
@@ -285,6 +371,7 @@ def run_edge_loop(
     t_prev = time.perf_counter()
     fps_smooth = 0.0
     stream_http = hasattr(cap, "url")
+    window_ready = False
 
     try:
         while not stop_flag.is_set():
@@ -298,6 +385,29 @@ def run_edge_loop(
                 break
 
             fh, fw = frame.shape[0], frame.shape[1]
+            if view and not window_ready:
+                try:
+                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                    window_ready = True
+                except Exception:
+                    log.warning("Could not create OpenCV window (headless display?)")
+                    window_ready = True
+
+            if view and frame_index == 0:
+                hint = frame.copy()
+                cv2.putText(
+                    hint,
+                    "Running AI on first frame (please wait)...",
+                    (10, min(40, fh - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 255, 200),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.imshow(window_name, hint)
+                cv2.waitKey(1)
+
             if width <= 0 or height <= 0:
                 width, height = fw, fh
             if writer is None and writer_pending_path is not None:
@@ -394,6 +504,11 @@ def run_edge_loop(
             try:
                 esp32_daemon.stop()
                 esp32_daemon.join(timeout=3.0)
+            except Exception:
+                pass
+        if rfid_reader is not None:
+            try:
+                rfid_reader.stop()
             except Exception:
                 pass
         if hw_monitor is not None:

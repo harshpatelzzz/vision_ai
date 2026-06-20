@@ -10,21 +10,38 @@ from typing import Any, Dict, Optional, Union
 
 import yaml
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hardware.registry import get_registered_store, get_registered_stream_url
+from hardware.rfid_registry import get_access_control, get_or_build_access_control, get_rfid_reader
 from security.attestation import generate_attestation_report
-from security.logger import SecureLogger, VPAPLogger
+from security.logger import SecureLogger, VPAPLogger, normalize_event_record
 from security.verification import verify_chain_detail
 
 app = FastAPI(title="PoseVision Edge API", version="1.0.0")
 
+# Allow the command-center dashboard (Vite dev server / static build) to call the
+# edge node from the browser. Override the allowed origins via
+# POSEVISION_CORS_ORIGINS (comma-separated) in production; defaults are permissive
+# for local/LAN demos. In dev the Vite proxy keeps requests same-origin anyway.
+_cors_env = os.environ.get("POSEVISION_CORS_ORIGINS", "*")
+_cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] or ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 _vpap: Union[VPAPLogger, SecureLogger, None] = None
 _hw_monitor: Optional[Any] = None
 _logging_yaml_cache: Optional[Dict[str, Any]] = None
+_full_config_cache: Optional[Dict[str, Any]] = None
 
 
 def _logging_section() -> Dict[str, Any]:
@@ -39,6 +56,24 @@ def _logging_section() -> Dict[str, Any]:
         except (OSError, yaml.YAMLError):
             _logging_yaml_cache = {}
     return _logging_yaml_cache
+
+
+def _full_config() -> Dict[str, Any]:
+    """Load and cache the entire ``config/config.yaml`` (for RFID/zones)."""
+    global _full_config_cache
+    if _full_config_cache is None:
+        cfg_path = ROOT / "config" / "config.yaml"
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                _full_config_cache = yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError):
+            _full_config_cache = {}
+    return _full_config_cache
+
+
+def _access_control() -> Any:
+    """Live AccessControl from the running pipeline, else a file-backed instance."""
+    return get_or_build_access_control(ROOT, _full_config())
 
 
 def _resolve_log_path() -> Path:
@@ -203,6 +238,109 @@ def security_status() -> Dict[str, Any]:
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+# --------------------------------------------------------------------------
+# RFID / RBAC access control
+# --------------------------------------------------------------------------
+@app.get("/rfid/status")
+def rfid_status() -> Dict[str, Any]:
+    """Reader connectivity + access-control statistics."""
+    reader = get_rfid_reader()
+    ac = get_access_control()
+    return {
+        "reader": reader.status() if reader is not None else {"running": False, "mode": "offline"},
+        "access_control": ac.stats() if ac is not None else _access_control().stats(),
+    }
+
+
+@app.get("/rfid/users")
+def rfid_users() -> Dict[str, Any]:
+    """List the authorized-personnel database (UID -> profile)."""
+    ac = _access_control()
+    users = ac.user_db.all_users()
+    return {"count": len(users), "users": users}
+
+
+@app.get("/rfid/access-log")
+def rfid_access_log(limit: int = 100) -> Dict[str, Any]:
+    """Recent access decisions (AUTHORIZED_ACCESS / ZONE_VIOLATION / ...)."""
+    ac = _access_control()
+    return {"events": ac.recent_access_log(limit=limit)}
+
+
+@app.get("/rfid/last-scan")
+def rfid_last_scan() -> Dict[str, Any]:
+    """Most recent tag scanned by the live reader."""
+    reader = get_rfid_reader()
+    if reader is None:
+        return {"last_scan": None, "reader_running": False}
+    return {"last_scan": reader.last_scan(), "reader_running": True}
+
+
+@app.post("/rfid/register")
+def rfid_register(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Register / update a tag. Body: {uid, name, role, allowed_zones:[...]}.
+
+    When ``uid`` is omitted, the last tag scanned by the live reader is used
+    (hardware enrollment flow: present card, then POST name/role/zones).
+    """
+    ac = _access_control()
+    uid = body.get("uid")
+    if not uid:
+        reader = get_rfid_reader()
+        scan = reader.last_scan() if reader is not None else None
+        uid = scan.get("uid") if scan else None
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid required (or scan a card first)")
+    try:
+        user = ac.user_db.add_user(
+            uid=str(uid),
+            name=str(body.get("name", "")),
+            role=str(body.get("role", "")),
+            allowed_zones=[str(z) for z in (body.get("allowed_zones") or [])],
+            overwrite=bool(body.get("overwrite", True)),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    user_out = {**user.to_dict(), "uid": user.uid}
+    record = _audit_registration("RFID_REGISTER", dict(user_out))
+    return {"status": "ok", "user": user_out, "audit": record}
+
+
+@app.post("/rfid/remove")
+def rfid_remove(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove a tag from the database. Body: {uid}."""
+    ac = _access_control()
+    uid = body.get("uid")
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid required")
+    removed = ac.user_db.remove_user(str(uid))
+    if not removed:
+        raise HTTPException(status_code=404, detail="uid not found")
+    record = _audit_registration("RFID_REMOVE", {"uid": str(uid)})
+    return {"status": "ok", "removed": str(uid), "audit": record}
+
+
+def _audit_registration(action: str, detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Append registration changes to the VPAP hash chain + blockchain ledger."""
+    try:
+        vp = get_vpap()
+        observation = {
+            "timestamp": "",
+            "bbox": [0.0, 0.0, 0.0, 0.0],
+            "ppe": {"helmet": False, "vest": False},
+            "posture": "Unknown",
+            "intrusion": False,
+            "access": {**detail, "action": action},
+        }
+        rec = normalize_event_record(alert_type=action, person_id=-1, observation=observation)
+        if isinstance(vp, SecureLogger):
+            return vp.log_event(rec, force=True)
+        return vp.append(rec)
+    except Exception:
+        return None
 
 
 @app.get("/hardware/status")

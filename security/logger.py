@@ -141,6 +141,11 @@ def normalize_event_record(
         rec["telemetry"] = observation.get("telemetry")
     if observation.get("tamper_reason") is not None:
         rec["tamper_reason"] = observation.get("tamper_reason")
+    # Preserve the RFID/RBAC authorization block (uid, name, role, zone,
+    # authorized, decision, ...) so it is hash-chained and committed to the
+    # blockchain/Merkle/IPFS sidecar alongside the alert.
+    if isinstance(observation.get("access"), dict):
+        rec["access"] = dict(observation["access"])
     return rec
 
 

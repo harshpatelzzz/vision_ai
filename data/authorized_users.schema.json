@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://posevision.local/schemas/authorized_users.schema.json",
+  "title": "PoseVision Authorized Users Database",
+  "description": "Maps an RFID tag UID (uppercase, colon-separated hex bytes) to a person and their access profile.",
+  "type": "object",
+  "additionalProperties": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Human-readable personnel name.",
+        "minLength": 1
+      },
+      "role": {
+        "type": "string",
+        "description": "RBAC role key; must exist in roles.json.",
+        "enum": ["Admin", "Guard", "Engineer", "Worker", "Visitor"]
+      },
+      "allowed_zones": {
+        "type": "array",
+        "description": "Zones this specific person may enter. Use [\"*\"] for all zones. Intersected with the role policy at evaluation time.",
+        "items": { "type": "string" },
+        "uniqueItems": true
+      }
+    },
+    "required": ["name", "role", "allowed_zones"],
+    "additionalProperties": true
+  },
+  "propertyNames": {
+    "pattern": "^([0-9A-Za-z]{2})(:[0-9A-Za-z]{2})*$"
+  }
+}

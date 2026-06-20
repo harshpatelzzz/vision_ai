@@ -9,6 +9,8 @@ models:
 camera:
   # Webcam index or video file path (overridden by CLI)
   source: 0
+  # Windows: DirectShow often fixes blank / no-preview with USB webcams (OpenCV default MSMF)
+  prefer_dshow: true
   # Use string for file: "assets/videos/example_workers.mp4"
   # ESP32-CAM (CLI: --source esp32cam --stream-url http://IP:81/stream)
   esp32_stream_url: ""
@@ -42,6 +44,8 @@ inference:
   ppe_inside_person_min: 0.4
   iou_pose_person: 0.3
   conf_threshold: 0.25
+  # Downscale wide webcam frames before YOLO (huge CPU speedup). 0 = full resolution.
+  max_inference_width: 640
 
 posture:
   standing_min_deg: 60
@@ -57,6 +61,38 @@ tripwire:
     - [540, 100]
     - [540, 380]
     - [100, 380]
+
+# Named restricted zones (RFID/RBAC). Each person inside a zone is authorized
+# against this zone. If omitted, the single tripwire.polygon above is mapped to
+# default_zone (fully backward compatible).
+zones:
+  default_zone: "ZoneA"        # used when a person is outside every named polygon
+  fallback_to_default: true
+  definitions:
+    ZoneA:
+      polygon: [[100, 100], [320, 100], [320, 380], [100, 380]]
+    ZoneB:
+      polygon: [[320, 100], [540, 100], [540, 380], [320, 380]]
+    # ZoneC:
+    #   polygon: [[540, 100], [760, 100], [760, 380], [540, 380]]
+
+# RFID identity verification + Role-Based Access Control.
+# When disabled, intrusion detection behaves exactly as before (raw INTRUSION).
+rfid:
+  enabled: false
+  mode: "simulation"            # "serial", "http"/"wifi", or "simulation"
+  serial_port: ""               # e.g. COM6 or /dev/ttyUSB1 (ESP32 + MFRC522)
+  baudrate: 115200
+  http_poll_url: ""             # e.g. http://192.168.1.50/rfid/last-scan
+  poll_interval_s: 0.3
+  scan_dedup_seconds: 1.5       # ignore repeat reads of same tag within window
+  correlation_window_seconds: 5.0  # max age of a scan to bind to an intrusion
+  users_db: "data/authorized_users.json"
+  roles_db: "data/roles.json"
+  max_consecutive_failures: 3   # repeated denials raise an ACCESS_DENIED alert
+  access_log: "logs/rfid_access.log"
+  # Tags cycled in simulation mode (last one is intentionally unregistered):
+  simulation_uids: ["A1:B2:C3:D4", "E5:F6:G7:H8", "ZZ:ZZ:ZZ:ZZ"]
 
 privacy:
   # Never persist raw frames; keep only in RAM for live preview
