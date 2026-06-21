@@ -66,6 +66,7 @@ class LiveVisionService:
         self.target_fps = float(live_cfg.get("target_fps", 15.0))
 
         self._lock = threading.Lock()
+        self._start_lock = threading.Lock()  # serializes start/stop transitions
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._running = False
@@ -93,43 +94,45 @@ class LiveVisionService:
         return self._running
 
     def start(self, source: str = "webcam", stream_url: Optional[str] = None) -> Dict[str, Any]:
-        with self._lock:
-            if self._running:
-                # already running — switch source if different
-                if source == self._source and stream_url == self._stream_url:
+        # Idempotent + thread-safe. Joins happen OUTSIDE the lock (no lock juggling),
+        # so concurrent /live/start calls (e.g. React StrictMode double-mount) and a
+        # failed camera open can never wedge or crash the server.
+        with self._start_lock:
+            with self._lock:
+                if self._running and source == self._source and stream_url == self._stream_url:
                     return self.status()
-                self._stop_locked()
-            self._source = source
-            self._stream_url = stream_url
-            self._stop.clear()
-            self._error = None
-            self._thread = threading.Thread(target=self._run_loop, name="live-vision", daemon=True)
-            self._running = True
-            self._thread.start()
+                need_stop = self._running or (self._thread is not None and self._thread.is_alive())
+            if need_stop:
+                self._stop_worker()
+            with self._lock:
+                self._source = source
+                self._stream_url = stream_url
+                self._stop.clear()
+                self._error = None
+                self._thread = threading.Thread(target=self._run_loop, name="live-vision", daemon=True)
+                self._running = True
+                self._thread.start()
         logger.info("LiveVisionService started (source=%s)", source)
         return self.status()
 
     def stop(self) -> Dict[str, Any]:
-        with self._lock:
-            self._stop_locked()
+        with self._start_lock:
+            self._stop_worker()
         return self.status()
 
-    def _stop_locked(self) -> None:
-        self._stop.set()
-        self._running = False
-        th = self._thread
-        if th and th.is_alive():
-            # release lock-free join
-            self._lock.release()
-            try:
-                th.join(timeout=4.0)
-            finally:
-                self._lock.acquire()
-        self._thread = None
-        if self._tracker is not None:
-            self._tracker.reset()
-        self._detections = []
-        self._latest_jpeg = None
+    def _stop_worker(self) -> None:
+        with self._lock:
+            th = self._thread
+            self._stop.set()
+            self._running = False
+            self._thread = None
+        if th is not None and th.is_alive():
+            th.join(timeout=6.0)
+        with self._lock:
+            if self._tracker is not None:
+                self._tracker.reset()
+            self._detections = []
+            self._latest_jpeg = None
 
     # ---------------- snapshots for the API ----------------
     def status(self) -> Dict[str, Any]:
@@ -236,13 +239,30 @@ class LiveVisionService:
         import sys
 
         use_dshow = bool(cam_cfg.get("prefer_dshow", True)) and sys.platform == "win32"
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW if use_dshow else cv2.CAP_ANY)
-        if not cap.isOpened() and use_dshow:
-            cap = cv2.VideoCapture(index)
-        if not cap.isOpened():
-            self._error = f"Cannot open camera source {index}"
-            return None
-        return cap
+        backends = [cv2.CAP_DSHOW, cv2.CAP_ANY] if use_dshow else [cv2.CAP_ANY]
+
+        # Retry: the OS may not have released the device from a previous session
+        # (rapid Stop/Start, or another app). Back off briefly instead of failing.
+        for attempt in range(4):
+            if self._stop.is_set():
+                return None
+            for backend in backends:
+                cap = cv2.VideoCapture(index, backend)
+                if cap.isOpened():
+                    ok, _ = cap.read()
+                    if ok:
+                        self._error = None
+                        return cap
+                cap.release()
+            self._error = f"Camera {index} busy — retrying ({attempt + 1}/4)"
+            logger.warning("camera open attempt %d failed (index=%s)", attempt + 1, index)
+            self._stop.wait(1.0)
+
+        self._error = (
+            f"Cannot open camera source {index}. It may be in use by another app "
+            "or browser tab — close it and press Start again."
+        )
+        return None
 
     def _run_loop(self) -> None:
         try:

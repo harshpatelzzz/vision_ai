@@ -460,18 +460,26 @@ def live_detections() -> Dict[str, Any]:
 
 @app.get("/video/stream")
 def video_stream() -> StreamingResponse:
-    """MJPEG stream of the annotated live frame (memory-only; nothing persisted)."""
+    """MJPEG stream of the annotated live frame (memory-only; nothing persisted).
+
+    Does NOT start the camera itself — the dashboard calls /live/start with the
+    chosen source first, so webcam/ESP32 selection is never overridden here.
+    """
     svc = _live_service()
-    if not svc.is_running():
-        svc.start(source="webcam")
 
     def gen():
         boundary = b"--frame"
+        idle = 0
         while True:
             jpeg = svc.latest_jpeg()
             if jpeg is None:
+                idle += 1
+                # give up after ~12s of no frames (service idle / camera busy)
+                if idle > 240 and not svc.is_running():
+                    break
                 time.sleep(0.05)
                 continue
+            idle = 0
             yield boundary + b"\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
             time.sleep(1.0 / 20.0)
 
