@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.geometry import bbox_center, iou_xyxy
+from core.geometry import bbox_center, inside_ratio_xyxy, iou_xyxy
 
 BBox = Tuple[float, float, float, float]
 
@@ -31,6 +31,7 @@ class TrackingConfig:
     minimum_visible_keypoints: int = 4
     person_matching_iou: float = 0.3           # match detection -> track
     merge_iou: float = 0.6                     # collapse duplicate detections
+    merge_containment: float = 0.7             # collapse nested boxes (one inside other)
     track_timeout_frames: int = 30             # drop track after N missed frames
     min_hits: int = 2                          # frames before a track is reported
 
@@ -43,6 +44,7 @@ class TrackingConfig:
             minimum_visible_keypoints=int(cfg.get("minimum_visible_keypoints", 4)),
             person_matching_iou=float(cfg.get("person_matching_iou", 0.3)),
             merge_iou=float(cfg.get("merge_iou", 0.6)),
+            merge_containment=float(cfg.get("merge_containment", 0.7)),
             track_timeout_frames=int(cfg.get("track_timeout", 30)),
             min_hits=int(cfg.get("track_buffer", 2)),
         )
@@ -100,22 +102,44 @@ def filter_detections(dets: List[Dict[str, Any]], cfg: TrackingConfig) -> List[D
     return kept
 
 
-def merge_overlapping(dets: List[Dict[str, Any]], merge_iou: float) -> List[Dict[str, Any]]:
-    """Collapse detections that overlap heavily — the same person seen twice."""
+def merge_overlapping(
+    dets: List[Dict[str, Any]],
+    merge_iou: float,
+    merge_containment: float = 0.7,
+) -> List[Dict[str, Any]]:
+    """Collapse detections that are the same person seen twice.
+
+    Two cases are merged: heavy overlap (IoU >= ``merge_iou``) AND containment —
+    a small box mostly inside a larger one (e.g. a tight head/torso box nested in
+    a full-body box), which has low IoU but is clearly the same person. The
+    larger box absorbs PPE flags from the smaller so gear on the head still
+    counts toward the surviving person.
+    """
     merged: List[Dict[str, Any]] = []
     used = [False] * len(dets)
-    # process strongest first so the surviving box is the most confident
-    order = sorted(range(len(dets)), key=lambda i: -float(dets[i].get("confidence", 0.0)))
+    # process by area (largest first) so the full-body box survives and absorbs
+    # the nested head/torso box rather than the other way around.
+    order = sorted(range(len(dets)), key=lambda i: -_area(tuple(dets[i]["bbox"])))
     for oi, i in enumerate(order):
         if used[i]:
             continue
         base = dets[i]
         used[i] = True
+        a = tuple(base["bbox"])
         for j in order[oi + 1 :]:
             if used[j]:
                 continue
-            if iou_xyxy(tuple(base["bbox"]), tuple(dets[j]["bbox"])) >= merge_iou:
-                used[j] = True  # absorb the duplicate
+            b = tuple(dets[j]["bbox"])
+            nested = inside_ratio_xyxy(a, b) >= merge_containment or inside_ratio_xyxy(b, a) >= merge_containment
+            if iou_xyxy(a, b) >= merge_iou or nested:
+                used[j] = True  # absorb duplicate
+                # keep any positive PPE the absorbed box detected
+                bppe = dets[j].get("ppe") or {}
+                appe = base.get("ppe") or {}
+                base["ppe"] = {
+                    "helmet": bool(appe.get("helmet")) or bool(bppe.get("helmet")),
+                    "vest": bool(appe.get("vest")) or bool(bppe.get("vest")),
+                }
         merged.append(base)
     return merged
 
@@ -141,7 +165,11 @@ class PersonTracker:
     def update(self, raw_detections: List[Dict[str, Any]], frame_index: int) -> List[Track]:
         """Advance the tracker one frame; returns *confirmed* active tracks."""
         self._frame = frame_index
-        dets = merge_overlapping(filter_detections(raw_detections, self.cfg), self.cfg.merge_iou)
+        dets = merge_overlapping(
+            filter_detections(raw_detections, self.cfg),
+            self.cfg.merge_iou,
+            self.cfg.merge_containment,
+        )
 
         track_ids = list(self._tracks.keys())
         # Build IoU candidate pairs (track, det) above threshold.

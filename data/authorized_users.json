@@ -8,10 +8,5 @@
     "name": "Construction Worker",
     "role": "Worker",
     "allowed_zones": ["ZoneA"]
-  },
-  "A6": {
-    "name": "JAYZ",
-    "role": "Worker",
-    "allowed_zones": ["ZoneA"]
   }
 }

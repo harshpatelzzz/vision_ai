@@ -341,6 +341,11 @@ class LiveVisionService:
 
         if self._access_control is None or self._reader is None:
             return
+        # In simulation mode the reader injects synthetic UIDs on a timer; binding
+        # those to a real detected person would mislabel the live card. Identity is
+        # only attached from a genuine hardware scan (serial / http reader).
+        if getattr(self._reader, "mode", "") == "simulation":
+            return
         uid = None
         try:
             uid = self._reader.read_uid()

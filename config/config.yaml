@@ -44,6 +44,9 @@ inference:
   ppe_inside_person_min: 0.4
   iou_pose_person: 0.3
   conf_threshold: 0.5
+  # Positive gear (Hardhat/Vest) must clear this higher bar to count as "wearing",
+  # so look-alikes (headphones, caps) are not reported as a helmet.
+  ppe_confidence: 0.7
   # Downscale wide webcam frames before YOLO (huge CPU speedup). 0 = full resolution.
   max_inference_width: 640
 
@@ -107,12 +110,13 @@ event_engine:
 # ghost/duplicate detections before they reach the dashboard or blockchain.
 tracking:
   person_confidence: 0.45          # drop person boxes below this YOLO confidence
-  minimum_bbox_area: 1500          # px^2 (full-frame); rejects tiny false positives
+  minimum_bbox_area: 2500          # px^2 (full-frame); rejects small false positives
   minimum_visible_keypoints: 4     # require a real pose when posture is classified
   person_matching_iou: 0.3         # IoU to match a detection to an existing track
-  merge_iou: 0.6                   # IoU above which two boxes are the same person
+  merge_iou: 0.55                  # IoU above which two boxes are the same person
+  merge_containment: 0.6           # collapse a nested box (head/torso inside body)
   track_timeout: 30                # frames a track survives unseen before deletion
-  track_buffer: 2                  # frames a new track must persist before reporting
+  track_buffer: 3                  # frames a new track must persist before reporting
 
 # Live vision service consumed by the dashboard Live Monitoring page
 # (camera -> YOLO -> tracker -> /video/stream MJPEG + /ws/live-events).

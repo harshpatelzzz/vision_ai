@@ -66,6 +66,9 @@ class EdgeVisionPipeline:
     ppe_inside_person_min: float = 0.6
     iou_pose_person: float = 0.3
     conf_threshold: float = 0.25
+    # Minimum confidence for a POSITIVE gear detection (Hardhat/Vest) to count as
+    # "wearing". Higher than conf_threshold to suppress look-alike false positives.
+    ppe_confidence: float = 0.6
     posture_angles: Dict[str, float] = field(default_factory=dict)
     tripwire_enabled: bool = True
     tripwire_polygon: List[List[float]] = field(default_factory=list)
@@ -321,12 +324,25 @@ class EdgeVisionPipeline:
         boxes = ppe_res.boxes
         xyxy = boxes.xyxy.cpu().numpy()
         cls = boxes.cls.cpu().numpy().astype(int)
+        conf = (
+            boxes.conf.cpu().numpy()
+            if getattr(boxes, "conf", None) is not None
+            else np.ones(len(xyxy), dtype=float)
+        )
         for i in range(len(xyxy)):
             c = int(cls[i])
             label = self._label_map.get(c, str(c))
             if self._person_cls_id is not None and c == self._person_cls_id:
                 continue
             if "person" in label.lower() and self._person_cls_id is None:
+                continue
+            # Stricter floor for "wearing" gear (Hardhat/Vest) so borderline
+            # false positives (e.g. headphones read as a hardhat) don't count.
+            low = label.lower()
+            is_positive_gear = ("hardhat" in low or "helmet" in low or "vest" in low) and not (
+                "no-" in low or "no_" in low
+            )
+            if is_positive_gear and float(conf[i]) < self.ppe_confidence:
                 continue
             items.append((tuple(map(float, xyxy[i])), c, label))
         return items
@@ -514,6 +530,7 @@ def build_pipeline_from_config(
         ppe_inside_person_min=float(inf.get("ppe_inside_person_min", 0.6)),
         iou_pose_person=float(inf.get("iou_pose_person", 0.3)),
         conf_threshold=float(inf.get("conf_threshold", 0.25)),
+        ppe_confidence=float(inf.get("ppe_confidence", 0.6)),
         posture_angles=dict(posture),
         tripwire_enabled=bool(tw.get("enabled", True)),
         tripwire_polygon=list(tw.get("polygon", [])),
