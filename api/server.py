@@ -85,6 +85,21 @@ def _live_service() -> Any:
     return get_live_service(_full_config(), ROOT, vpap=get_vpap())
 
 
+@app.on_event("startup")
+def _startup_rfid() -> None:
+    """Bring the RFID reader online at boot (when enabled) so the RFID Access page
+    shows live badge taps + access decisions without needing the camera running."""
+    cfg = _full_config()
+    if not (cfg.get("rfid") or {}).get("enabled", False):
+        return
+    try:
+        from core.runner import build_rfid_runtime
+
+        build_rfid_runtime(cfg, ROOT, get_vpap())
+    except Exception:
+        pass
+
+
 def _resolve_log_path() -> Path:
     env = os.environ.get("POSEVISION_VPAP_LOG") or os.environ.get("POSEVISION_SECURE_LOG")
     if env:

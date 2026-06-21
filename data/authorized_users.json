@@ -1,1 +1,17 @@
-{}
+{
+  "A1:B2:C3:D4": {
+    "name": "Security Guard",
+    "role": "Guard",
+    "allowed_zones": ["ZoneA", "ZoneB", "ZoneC"]
+  },
+  "E5:F6:G7:H8": {
+    "name": "Construction Worker",
+    "role": "Worker",
+    "allowed_zones": ["ZoneA"]
+  },
+  "A6": {
+    "name": "JAYZ",
+    "role": "Worker",
+    "allowed_zones": ["ZoneA"]
+  }
+}

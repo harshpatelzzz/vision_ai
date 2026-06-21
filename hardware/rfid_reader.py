@@ -86,6 +86,10 @@ class RfidReader(threading.Thread):
             self.start()
         return self
 
+    def set_on_scan(self, callback: Optional[Callable[[Scan], None]]) -> None:
+        """Register/replace the per-scan callback (used for gate access evaluation)."""
+        self._on_scan = callback
+
     def stop(self) -> None:
         self._stop.set()
 

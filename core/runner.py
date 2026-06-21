@@ -202,34 +202,36 @@ def setup_esp32_sensor_stack(
     return store, daemon, bridge
 
 
-def setup_rfid_stack(
+def build_rfid_runtime(
     config: Dict[str, Any],
     project_root: Path,
-    event_engine: EventEngine,
     vpap: Optional[Union[VPAPLogger, SecureLogger]],
-) -> Optional[Any]:
+) -> Optional[Tuple[Any, Any]]:
     """
-    Optional RFID + RBAC authorization layer over tripwire intrusion detection.
+    Build + start the RFID reader and AccessControl, register them, return both.
 
-    When ``rfid.enabled`` is True this:
-      1. Starts an :class:`~hardware.rfid_reader.RfidReader` (serial/http/sim),
-      2. Builds an :class:`~security.access_control.AccessControl` bound to the
-         reader's latest UID,
-      3. Installs ``access_control.resolve_intrusion`` as the EventEngine's
-         access resolver — so intrusions become AUTHORIZED_ACCESS /
-         ZONE_VIOLATION / UNKNOWN_RFID / UNAUTHORIZED_INTRUSION,
-      4. Routes ACCESS_DENIED security alerts (repeated failures) into the VPAP
-         hash chain + blockchain ledger,
-      5. Registers both with :mod:`hardware.rfid_registry` for the API.
+    Idempotent: if a reader + access control are already registered (e.g. started
+    at API boot), the existing pair is reused so the dashboard, live pipeline and
+    API all share one reader. Returns ``(reader, access_control)`` or ``None`` when
+    ``rfid.enabled`` is False.
 
-    Returns the :class:`RfidReader` (or None when disabled).
+    In every mode each scan is evaluated against the default zone (a "badge tap at
+    the gate" — independent of the camera), so the RFID Access page shows live
+    grant/deny decisions on its own. The live pipeline additionally re-evaluates
+    per detected person via the EventEngine resolver.
     """
     rfid_cfg = config.get("rfid") or {}
     if not rfid_cfg.get("enabled", False):
         return None
 
+    from hardware.rfid_registry import get_access_control, get_rfid_reader, register_rfid
+
+    existing_reader = get_rfid_reader()
+    existing_ac = get_access_control()
+    if existing_reader is not None and existing_ac is not None:
+        return existing_reader, existing_ac
+
     from hardware.rfid_reader import RfidReader
-    from hardware.rfid_registry import register_rfid
     from security.access_control import build_access_control_from_config
 
     tlog = _get_tamper_logger(project_root)
@@ -257,11 +259,7 @@ def setup_rfid_stack(
             "intrusion": True,
             "access": detail,
         }
-        rec = normalize_event_record(
-            alert_type=alert_type,
-            person_id=-1,
-            observation=observation,
-        )
+        rec = normalize_event_record(alert_type=alert_type, person_id=-1, observation=observation)
         if isinstance(vpap, SecureLogger):
             vpap.append_forced(rec)
         else:
@@ -274,10 +272,40 @@ def setup_rfid_stack(
         on_security_alert=on_security_alert,
     )
 
+    # Each badge tap -> an access decision against the default zone (gate reader).
+    default_zone = access_control.zones.default_zone
+
+    def on_scan(scan: Any) -> None:
+        try:
+            access_control.evaluate(scan.uid, default_zone)
+        except Exception:
+            pass
+
+    reader.set_on_scan(on_scan)
     reader.start_reader()
-    event_engine.set_access_resolver(access_control.resolve_intrusion)
     register_rfid(reader=reader, access_control=access_control)
-    tlog.info("RFID access control enabled (mode=%s)", reader.mode)
+    tlog.info("RFID runtime started (mode=%s, gate-zone=%s)", reader.mode, default_zone)
+    return reader, access_control
+
+
+def setup_rfid_stack(
+    config: Dict[str, Any],
+    project_root: Path,
+    event_engine: EventEngine,
+    vpap: Optional[Union[VPAPLogger, SecureLogger]],
+) -> Optional[Any]:
+    """
+    Wire the RFID + RBAC authorization layer to ``event_engine`` for the live
+    pipeline: builds/reuses the shared reader + AccessControl and installs
+    ``access_control.resolve_intrusion`` as the EventEngine access resolver so
+    intrusions become AUTHORIZED_ACCESS / ZONE_VIOLATION / UNKNOWN_RFID /
+    UNAUTHORIZED_INTRUSION. Returns the reader (or None when disabled).
+    """
+    runtime = build_rfid_runtime(config, project_root, vpap)
+    if runtime is None:
+        return None
+    reader, access_control = runtime
+    event_engine.set_access_resolver(access_control.resolve_intrusion)
     return reader
 
 

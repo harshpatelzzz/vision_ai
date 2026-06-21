@@ -79,7 +79,7 @@ zones:
 # RFID identity verification + Role-Based Access Control.
 # When disabled, intrusion detection behaves exactly as before (raw INTRUSION).
 rfid:
-  enabled: false
+  enabled: true
   mode: "simulation"            # "serial", "http"/"wifi", or "simulation"
   serial_port: ""               # e.g. COM6 or /dev/ttyUSB1 (ESP32 + MFRC522)
   baudrate: 115200
