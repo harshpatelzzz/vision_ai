@@ -1,18 +1,20 @@
 import { useState, useEffect } from "react";
-import { Cpu, Link2, Wifi, Activity, RefreshCw } from "lucide-react";
+import { Cpu, Link2, Wifi, Activity, RefreshCw, Play, Pause } from "lucide-react";
 import { GlassCard, SectionTitle } from "@/components/ui/GlassCard";
 import { StatusPill } from "@/components/ui/StatusPill";
 import { CameraStage } from "@/components/widgets/CameraStage";
 import { DetectionPanel } from "@/components/widgets/DetectionPanel";
 import { useHardwareStream, useHardwareStatus, useHardwareSensors } from "@/hooks/useApiData";
-import { useLiveDetections } from "@/hooks/useLiveDetections";
+import { useLiveFeed } from "@/hooks/useLiveFeed";
+import { cn } from "@/lib/utils";
 
 export default function Esp32Camera() {
   const stream = useHardwareStream();
   const status = useHardwareStatus();
   const sensors = useHardwareSensors();
-  const frame = useLiveDetections(true);
   const [url, setUrl] = useState("");
+  const [running, setRunning] = useState(false);
+  const { frame, error } = useLiveFeed("esp32", running, url || undefined);
 
   useEffect(() => {
     if (stream.data?.stream_url) setUrl(stream.data.stream_url);
@@ -25,8 +27,20 @@ export default function Esp32Camera() {
       <div className="space-y-4">
         <GlassCard>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <SectionTitle>ESP32-CAM · MJPEG Stream</SectionTitle>
-            <StatusPill severity={online ? "success" : "warning"} label={online ? "NODE LINKED" : "NO TELEMETRY"} />
+            <SectionTitle>ESP32-CAM · Edge AI Stream</SectionTitle>
+            <div className="flex items-center gap-2">
+              <StatusPill severity={online ? "success" : "warning"} label={online ? "NODE LINKED" : "NO TELEMETRY"} />
+              <button
+                onClick={() => setRunning((r) => !r)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-lg border px-3 py-1.5 font-mono text-[11px] uppercase",
+                  running ? "border-signal-red/40 bg-signal-red/10 text-signal-red" : "border-signal-green/40 bg-signal-green/10 text-signal-green",
+                )}
+              >
+                {running ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                {running ? "Stop" : "Start"}
+              </button>
+            </div>
           </div>
           <div className="mb-3 flex gap-2">
             <input
@@ -39,7 +53,11 @@ export default function Esp32Camera() {
               <RefreshCw className="h-4 w-4" />
             </button>
           </div>
-          <CameraStage source="esp32" streamUrl={url || undefined} frame={frame} />
+          {error && <p className="mb-2 font-mono text-[11px] text-signal-amber">{error}</p>}
+          <CameraStage source="esp32" frame={frame} running={running} />
+          <p className="mt-2 font-mono text-[10px] text-white/30">
+            The edge node ingests the ESP32-CAM MJPEG and runs YOLOv8 + pose + tripwire on it server-side.
+          </p>
         </GlassCard>
       </div>
 

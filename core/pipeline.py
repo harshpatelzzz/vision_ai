@@ -129,7 +129,9 @@ class EdgeVisionPipeline:
         annotated = frame_bgr.copy()
         self._draw_tripwire(annotated)
 
-        persons = [self._scale_xyxy(b, scale_to_orig) for b in self._extract_person_boxes(ppe_res)]
+        person_items: List[Tuple[BBox, float]] = [
+            (self._scale_xyxy(b, scale_to_orig), conf) for b, conf in self._extract_person_boxes(ppe_res)
+        ]
         ppe_items = [
             (self._scale_xyxy(b, scale_to_orig), cid, lab) for b, cid, lab in self._extract_ppe_items(ppe_res)
         ]
@@ -137,8 +139,11 @@ class EdgeVisionPipeline:
 
         self._draw_ppe_boxes_from_items(annotated, ppe_items)
 
-        if not persons and pose_pairs:
-            persons = [pb for pb, _ in pose_pairs]
+        if not person_items and pose_pairs:
+            # Fall back to pose person boxes (no PPE-model person); assign a neutral conf.
+            person_items = [(pb, 0.5) for pb, _ in pose_pairs]
+
+        persons = [pb for pb, _ in person_items]
 
         structured: List[Dict[str, Any]] = []
 
@@ -146,7 +151,7 @@ class EdgeVisionPipeline:
         smax = float(self.posture_angles.get("standing_max_deg", 100))
         sit_max = float(self.posture_angles.get("sitting_max_deg", 130))
 
-        for pid, pbox in enumerate(persons):
+        for pid, (pbox, pconf) in enumerate(person_items):
             assoc = self._associate_ppe(pbox, ppe_items)
             kpts = self._match_pose_keypoints(pbox, pose_pairs)
             if kpts is not None:
@@ -157,8 +162,10 @@ class EdgeVisionPipeline:
                     sitting_max_deg=sit_max,
                 )
                 self._draw_pose_skeleton(annotated, kpts, raw_posture, fallback_id=pid)
+                visible_kpts = sum(1 for x, y in kpts if x > 0.0 and y > 0.0)
             else:
                 raw_posture = "Unknown"
+                visible_kpts = 0
 
             cx, cy = bbox_center(pbox)
             intrusion = False
@@ -169,6 +176,8 @@ class EdgeVisionPipeline:
                 "timestamp": timestamp_iso,
                 "person_id": pid,
                 "bbox": [float(pbox[0]), float(pbox[1]), float(pbox[2]), float(pbox[3])],
+                "confidence": float(pconf),
+                "num_visible_keypoints": int(visible_kpts),
                 "ppe": {"helmet": assoc["helmet"], "vest": assoc["vest"]},
                 "posture": raw_posture,
                 "intrusion": intrusion,
@@ -280,22 +289,30 @@ class EdgeVisionPipeline:
             cv2.LINE_AA,
         )
 
-    def _extract_person_boxes(self, ppe_res: Any) -> List[BBox]:
-        out: List[BBox] = []
+    def _extract_person_boxes(self, ppe_res: Any) -> List[Tuple[BBox, float]]:
+        """Return person boxes with detection confidence: ``[(bbox, conf), ...]``."""
+        out: List[Tuple[BBox, float]] = []
         if ppe_res.boxes is None or len(ppe_res.boxes) == 0:
             return out
         boxes = ppe_res.boxes
         xyxy = boxes.xyxy.cpu().numpy()
         cls = boxes.cls.cpu().numpy().astype(int)
+        conf = (
+            boxes.conf.cpu().numpy()
+            if getattr(boxes, "conf", None) is not None
+            else np.ones(len(xyxy), dtype=float)
+        )
         for i in range(len(xyxy)):
             c = int(cls[i])
             name = self._label_map.get(c, "").lower()
-            if self._person_cls_id is not None and c == self._person_cls_id:
-                out.append(tuple(map(float, xyxy[i])))
-            elif "person" in name and self._person_cls_id is None:
-                out.append(tuple(map(float, xyxy[i])))
-        persons_sorted = sorted(out, key=lambda b: (b[1], b[0]))
-        return persons_sorted
+            is_person = (self._person_cls_id is not None and c == self._person_cls_id) or (
+                "person" in name and self._person_cls_id is None
+            )
+            if is_person:
+                out.append((tuple(map(float, xyxy[i])), float(conf[i])))
+        # sort top-to-bottom, left-to-right for stable ordering
+        out.sort(key=lambda item: (item[0][1], item[0][0]))
+        return out
 
     def _extract_ppe_items(self, ppe_res: Any) -> List[Tuple[BBox, int, str]]:
         items: List[Tuple[BBox, int, str]] = []

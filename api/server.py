@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import yaml
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -74,6 +76,13 @@ def _full_config() -> Dict[str, Any]:
 def _access_control() -> Any:
     """Live AccessControl from the running pipeline, else a file-backed instance."""
     return get_or_build_access_control(ROOT, _full_config())
+
+
+def _live_service() -> Any:
+    """Process-wide live vision service (camera -> YOLO -> tracker -> broadcast)."""
+    from core.live_service import get_live_service
+
+    return get_live_service(_full_config(), ROOT, vpap=get_vpap())
 
 
 def _resolve_log_path() -> Path:
@@ -414,9 +423,59 @@ def hardware_telemetry_ingest(body: Dict[str, Any]) -> Dict[str, str]:
 
 @app.get("/hardware/live-events")
 def hardware_live_events(limit: int = 50) -> Dict[str, Any]:
-    """Reserved JSON feed for dashboard polling (populate via future event bus)."""
+    """Live detections snapshot (JSON poll fallback for the WebSocket feed)."""
     _ = limit
-    return {"events": [], "note": "Wire EventEngine.recent_events here when wiring dashboard."}
+    return _live_service().detections_payload()
+
+
+# --------------------------------------------------------------------------
+# Live vision pipeline (real YOLO + tracker) — drives the dashboard Live page.
+# --------------------------------------------------------------------------
+@app.post("/live/start")
+def live_start(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Start the camera→AI→tracker loop. Body: {source:"webcam"|"esp32", stream_url?}."""
+    body = body or {}
+    source = str(body.get("source", "webcam"))
+    stream_url = body.get("stream_url")
+    try:
+        return _live_service().start(source=source, stream_url=stream_url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/live/stop")
+def live_stop() -> Dict[str, Any]:
+    return _live_service().stop()
+
+
+@app.get("/live/status")
+def live_status() -> Dict[str, Any]:
+    return _live_service().status()
+
+
+@app.get("/live/detections")
+def live_detections() -> Dict[str, Any]:
+    return _live_service().detections_payload()
+
+
+@app.get("/video/stream")
+def video_stream() -> StreamingResponse:
+    """MJPEG stream of the annotated live frame (memory-only; nothing persisted)."""
+    svc = _live_service()
+    if not svc.is_running():
+        svc.start(source="webcam")
+
+    def gen():
+        boundary = b"--frame"
+        while True:
+            jpeg = svc.latest_jpeg()
+            if jpeg is None:
+                time.sleep(0.05)
+                continue
+            yield boundary + b"\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+            time.sleep(1.0 / 20.0)
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.websocket("/ws/telemetry")
@@ -437,14 +496,16 @@ async def ws_telemetry(ws: WebSocket) -> None:
 
 @app.websocket("/ws/live-events")
 async def ws_live_events(ws: WebSocket) -> None:
-    """Placeholder stream hook for future annotated-frame metadata (no MJPEG binary here)."""
+    """Real-time per-person detections from the live vision service (tracked IDs)."""
     await ws.accept()
+    svc = _live_service()
     try:
-        await ws.send_json({"topic": "live-events", "schema": "reserved"})
         while True:
-            await asyncio.sleep(5.0)
-            await ws.send_json({"heartbeat": True})
+            await ws.send_json(svc.detections_payload())
+            await asyncio.sleep(0.15)
     except WebSocketDisconnect:
+        return
+    except Exception:
         return
 
 

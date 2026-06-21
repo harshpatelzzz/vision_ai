@@ -43,7 +43,7 @@ inference:
   # This requires that at least this fraction of PPE box lies inside person box.
   ppe_inside_person_min: 0.4
   iou_pose_person: 0.3
-  conf_threshold: 0.25
+  conf_threshold: 0.5
   # Downscale wide webcam frames before YOLO (huge CPU speedup). 0 = full resolution.
   max_inference_width: 640
 
@@ -102,6 +102,23 @@ privacy:
 
 event_engine:
   debounce_frames: 15
+
+# Person tracking — guarantees ONE persistent ID per real human and removes
+# ghost/duplicate detections before they reach the dashboard or blockchain.
+tracking:
+  person_confidence: 0.45          # drop person boxes below this YOLO confidence
+  minimum_bbox_area: 1500          # px^2 (full-frame); rejects tiny false positives
+  minimum_visible_keypoints: 4     # require a real pose when posture is classified
+  person_matching_iou: 0.3         # IoU to match a detection to an existing track
+  merge_iou: 0.6                   # IoU above which two boxes are the same person
+  track_timeout: 30                # frames a track survives unseen before deletion
+  track_buffer: 2                  # frames a new track must persist before reporting
+
+# Live vision service consumed by the dashboard Live Monitoring page
+# (camera -> YOLO -> tracker -> /video/stream MJPEG + /ws/live-events).
+live:
+  jpeg_quality: 70
+  target_fps: 15.0
 
 logging:
   secure: true

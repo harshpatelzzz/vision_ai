@@ -24,7 +24,7 @@ export function DetectionPanel({ detections }: { detections: Detection[] }) {
   return (
     <div className="space-y-2.5 overflow-y-auto pr-1">
       {detections.length === 0 && (
-        <p className="py-8 text-center font-mono text-[11px] text-white/30">No targets in frame</p>
+        <p className="py-8 text-center font-mono text-[11px] text-white/30">No active detections</p>
       )}
       <AnimatePresence initial={false}>
         {detections.map((d) => {
